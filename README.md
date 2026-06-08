@@ -1,6 +1,6 @@
-# AI 聊天伴侣 · AI Chat Companion
+# AI 聊天伴侣（极简版） · AI Chat Companion
 
-一个支持多种 AI 模型的角色扮演聊天应用，可安装为 Android APK 独立运行，也可作为 PWA 在浏览器中使用。
+一个支持多种 AI 模型的角色扮演的聊天应用，体积小，功能简洁，可安装为 Android APK 独立运行，也可作为 PWA 在浏览器中使用。
 
 ## ✨ 功能一览
 
