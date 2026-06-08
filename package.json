@@ -1,0 +1,18 @@
+{
+  "name": "ai-companion",
+  "version": "1.0.0",
+  "description": "AI 聊天伴侣 - 可自定义角色人设的 AI 聊天应用",
+  "main": "www/index.html",
+  "scripts": {
+    "build": "echo 'Static site - no build step needed'",
+    "cap:sync": "npx cap sync",
+    "cap:open": "npx cap open android"
+  },
+  "author": "王洛",
+  "license": "MIT",
+  "dependencies": {
+    "@capacitor/android": "^8.4.0",
+    "@capacitor/cli": "^8.4.0",
+    "@capacitor/core": "^8.4.0"
+  }
+}

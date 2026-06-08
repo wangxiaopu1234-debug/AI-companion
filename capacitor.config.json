@@ -1,0 +1,12 @@
+{
+  "appId": "com.aicompanion.app",
+  "appName": "AI聊天伴侣",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}
