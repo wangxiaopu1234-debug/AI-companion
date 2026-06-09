@@ -871,6 +871,7 @@ function dbGetAll(store, index, query, limit, reverse) {
       return;
     }
     const tx = db.transaction(store, 'readonly');
+    tx.onerror = () => { let arr = lsLoad(store); if (reverse) arr = arr.slice().reverse(); resolve(arr.slice(0, limit || 500)); };
     const s = tx.objectStore(store);
     const req = reverse ? s.openCursor(null, 'prev') : s.openCursor();
     const results = [];
@@ -1620,47 +1621,54 @@ async function saveSettings() {
 // Import / Export
 // ============================================================
 async function exportData() {
-  const memories = await dbGetAll('memories',null,null,1000,true);
-  const history = await dbGetAll('chat_history',null,null,5000,false);
-  const persona = await loadPersona();
-  const config = await loadConfig();
+  let memories, history, persona, config;
+  try {
+    memories = await dbGetAll('memories',null,null,1000,true);
+    history  = await dbGetAll('chat_history',null,null,5000,false);
+    persona  = await loadPersona();
+    config   = await loadConfig();
+  } catch(e) {
+    showToast('导出失败：' + (e && e.message ? e.message : '数据读取异常'));
+    return;
+  }
+  if (!history || !Array.isArray(history)) { showToast('导出失败：聊天记录读取异常'); return; }
+  if (!memories || !Array.isArray(memories)) { showToast('导出失败：记忆数据读取异常'); return; }
+
   const safeConfig = {apiBase:config.apiBase,model:config.model,temperature:config.temperature,maxTokens:config.maxTokens,maxHistory:config.maxHistory,memoryInterval:config.memoryInterval};
   const data = {version:2,exportedAt:new Date().toISOString(),persona:persona,config:safeConfig,memories:memories,chatHistory:history};
   const jsonStr = JSON.stringify(data,null,2);
 
-  // Android WebView 不支持 blob 下载，改用分享或复制
-  const isApp = typeof Capacitor !== 'undefined' && Capacitor.getPlatform() === 'android';
-
-  if (isApp || navigator.share) {
-    // 方案1：用系统分享（可发送到微信/文件管理器/邮件等）
-    try {
-      const blob = new Blob([jsonStr],{type:'application/json'});
-      const file = new File([blob], `ai-companion-backup-${new Date().toISOString().slice(0,10)}.json`, {type:'application/json'});
-      const shareData = {files:[file],title:'AI聊天伴侣-数据备份'};
-      if (navigator.canShare && navigator.canShare(shareData)) {
-        await navigator.share(shareData);
-        showToast(`导出成功：${history.length} 条聊天 + ${memories.length} 条记忆`);
-        return;
-      }
-    } catch(e) { /* 分享失败，走复制方案 */ }
-  }
-
-  // 方案2：弹窗显示文本，用户全选复制
   showExportCopyModal(jsonStr, history.length, memories.length);
 }
 
 function showExportCopyModal(jsonStr, chatCount, memCount) {
   window._exportStr = jsonStr;
-  const content = document.querySelector('#settingsModal .modal-content');
+  const content = document.querySelector('#settingsModal .modal-panel');
   if (!window._oldSettingsContent) window._oldSettingsContent = content.innerHTML;
   content.innerHTML = `
     <p style="text-align:center;font-size:16px;font-weight:700;margin-bottom:12px">📤 导出数据</p>
-    <p style="font-size:13px;color:var(--text-light);margin-bottom:8px">${chatCount} 条聊天 + ${memCount} 条记忆<br>点击下方文本框 → 全选 → 复制，粘贴到微信/备忘录/文件管理器保存</p>
-    <textarea id="exportTextarea" readonly style="width:100%;height:320px;font-size:12px;font-family:monospace;border:1px solid var(--border-color,#ccc);border-radius:8px;padding:8px;resize:none;background:var(--bg,#fff);color:var(--text,#333);box-sizing:border-box"></textarea>
-    <button class="btn btn-accent" style="width:100%;margin-top:10px" onclick="copyExportedText()">📋 一键复制</button>
-    <button class="btn btn-outline" style="width:100%;margin-top:6px" onclick="closeExportModal()">关闭</button>
+    <p style="font-size:13px;color:var(--text-light);margin-bottom:8px">${chatCount} 条聊天 + ${memCount} 条记忆<br>点击「下载」保存为 JSON 文件，或用「复制」手动粘贴</p>
+    <textarea id="exportTextarea" readonly style="width:100%;height:200px;font-size:12px;font-family:monospace;border:1px solid var(--border-color,#ccc);border-radius:8px;padding:8px;resize:none;background:var(--bg,#fff);color:var(--text,#333);box-sizing:border-box;margin-bottom:8px"></textarea>
+    <button class="btn btn-accent" style="width:100%;margin-top:4px" onclick="downloadExportFile()">⬇ 下载 JSON 文件 (UTF-8)</button>
+    <button class="btn btn-outline" style="width:100%;margin-top:4px" onclick="copyExportedText()">📋 一键复制</button>
+    <button class="btn btn-outline" style="width:100%;margin-top:4px" onclick="closeExportModal()">关闭</button>
   `;
   document.getElementById('exportTextarea').value = jsonStr;
+}
+
+function downloadExportFile() {
+  const str = window._exportStr;
+  if (!str) return;
+  const blob = new Blob([str], {type: 'application/json;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ai-companion-backup-${new Date().toISOString().slice(0,10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  showToast('正在下载...');
 }
 
 function copyExportedText() {
@@ -1671,7 +1679,7 @@ function copyExportedText() {
 }
 
 function closeExportModal() {
-  const content = document.querySelector('#settingsModal .modal-content');
+  const content = document.querySelector('#settingsModal .modal-panel');
   if (window._oldSettingsContent) { content.innerHTML = window._oldSettingsContent; window._oldSettingsContent = null; loadSettingsToForm(); loadMemoryEditor(); }
 }
 
@@ -1679,7 +1687,29 @@ async function importData(event) {
   const file = event.target.files[0];
   if (!file) return;
   try {
-    const text = await file.text();
+    // 自动检测编码：UTF-8 → UTF-16LE → UTF-16BE → GBK
+    const buffer = await file.arrayBuffer();
+    let text;
+    try {
+      text = new TextDecoder('utf-8', {fatal: true}).decode(buffer);
+    } catch(e) {}
+    
+    if (!text) {
+      // UTF-8 解码失败，尝试其他常见编码
+      const encodings = ['utf-16le', 'utf-16be', 'gbk', 'gb2312', 'big5'];
+      for (const enc of encodings) {
+        try {
+          const decoded = new TextDecoder(enc).decode(buffer);
+          try { JSON.parse(decoded); text = decoded; break; } catch(parseErr) {}
+        } catch(encErr) {}
+      }
+    }
+    
+    if (!text) {
+      showToast('导入失败：无法识别文件编码（请用 UTF-8 保存 JSON 文件）');
+      event.target.value = '';
+      return;
+    }
     const data = JSON.parse(text);
     let memCount = 0, chatCount = 0;
     // 导入人设
