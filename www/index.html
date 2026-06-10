@@ -933,7 +933,7 @@ async function dbRemoveMessages(store, ids) {
 // ============================================================
 const DEFAULT_CONFIG = {
   apiKey:'',apiBase:'https://api.deepseek.com',model:'deepseek-chat',
-  temperature:0.8,maxTokens:4096,maxHistory:20,memoryInterval:10
+  temperature:0.8,maxTokens:4096,maxHistory:20,memoryInterval:10,lastMemoryRound:0
 };
 const DEFAULT_PERSONA = {
   name:'',species:'',avatar:'',scene:'',traits:[],customTraits:'',
@@ -1000,7 +1000,7 @@ async function buildSystemPrompt() {
     const recent = memories.slice(0,30);
     const charName = persona.name || 'AI';
     memoryStr = '\n\n# 记忆\n以下是关于 ' + charName + ' 与用户之间的关键记忆与事件：\n';
-    for (const m of recent) memoryStr += `- ${m.content}\n`;
+    for (const m of recent) memoryStr += `#${m.id} ${m.content}\n`;
     memoryStr += `\n# 记忆应用
 - 像朋友般自然运用这些记忆，不刻意展示
 - 仅相关话题出现时引用，避免生硬插入
@@ -1101,14 +1101,14 @@ async function callAIStream(messages, config, onChunk, onFirstToken, signal) {
 // ============================================================
 // Memory Extraction
 // ============================================================
-async function extractMemories(contextStr) {
+async function extractMemories(contextStr, conversationTimestamp) {
   const config = await loadConfig();
   if (!config.apiKey) return { status: 'no_api_key' };
   const persona = await loadPersona();
   const charName = persona.name || 'AI角色';
   const existingMemories = await dbGetAll('memories', null, null, 200, true);
   const memoriesStr = existingMemories.length > 0
-    ? existingMemories.map(m => `- ${m.content}`).join('\n')
+    ? existingMemories.map(m => `#${m.id} ${m.content}`).join('\n')
     : '（暂无已知信息）';
   try {
     const url = (config.apiBase || 'https://api.deepseek.com').replace(/\/$/,'') + '/v1/chat/completions';
@@ -1167,11 +1167,20 @@ ${memoriesStr}
     const result = data.choices[0].message.content.trim();
     if (!result) return { status: 'nothing' };
     let count = 0;
+    const memTs = conversationTimestamp || Date.now();
     for (const line of result.split('\n')) {
       const trimmed = line.replace(/^[-*\d.]+\s*/,'').trim();
       if (trimmed && trimmed.length>2 && trimmed.length<300) {
-        await dbAdd('memories',{content:trimmed,category:'auto',timestamp:Date.now()});
+        await dbAdd('memories',{content:trimmed,category:'auto',timestamp:memTs});
         count++;
+      }
+    }
+    // 记忆上限 300 條，超出時自動刪除最舊的
+    if (count > 0) {
+      const allMems = await dbGetAll('memories', null, null, 1000, false);
+      if (allMems.length > 300) {
+        const toDelete = allMems.slice(0, allMems.length - 300);
+        for (const m of toDelete) await dbDelete('memories', m.id);
       }
     }
     return count > 0 ? { status: 'ok', count } : { status: 'nothing' };
@@ -1213,7 +1222,7 @@ async function send() {
     for (const h of history.reverse()) messages.push({role:h.role,content:h.content});
 
     abortController = new AbortController();
-    const timeoutId = setTimeout(() => abortController.abort(), 60000);
+    const timeoutId = setTimeout(() => abortController.abort(), 180000);
 
     let aiBubble = null, aiBubbleInner = null, fullReply = '';
 
@@ -1256,21 +1265,29 @@ async function send() {
       addMessage('ai', fullReply, aiMsgId);
     }
 
-    // Auto memory extraction
+    // Auto memory extraction — 基于上次提取轮次追踪
     const interval = config.memoryInterval || 0;
     if (interval > 0 && fullReply) {
       const allHistory = await dbGetAll('chat_history',null,null,1000,true);
       const roundCount = Math.floor(allHistory.length/2);
-      if (roundCount > 0 && roundCount % interval === 0) {
+      const lastRound = config.lastMemoryRound || 0;
+      if (roundCount - lastRound >= interval) {
         // 取最近 interval 轮完整对话
-        const recent = allHistory.slice(-(interval * 2));
+        const recent = allHistory.slice(0, interval * 2).reverse();
         const persona = await loadPersona();
         const charName = persona.name || 'AI';
         const contextStr = recent.map(m =>
           `${m.role === 'user' ? '用户' : charName}: ${m.content}`
         ).join('\n');
-        extractMemories(contextStr).then(r => {
-          if (r.status === 'ok') showToast(`🧠 记忆已更新 (+${r.count})`);
+        // 使用对话中最后一条消息的时间戳
+        const convTs = recent.length > 0 ? (recent[recent.length-1].timestamp || Date.now()) : Date.now();
+        extractMemories(contextStr, convTs).then(async r => {
+          // 无论提取结果如何，指针都要前进，避免重复提取同一批对话
+          config.lastMemoryRound = roundCount;
+          await saveConfigToDB(config);
+          if (r.status === 'ok') {
+            showToast(`🧠 记忆已更新 (+${r.count})`);
+          }
           else if (r.status === 'api_error') console.log('记忆提取 API 错误:', r.error);
         }).catch(() => {});
       }
@@ -1611,7 +1628,7 @@ async function saveSettings() {
     maxHistory: parseInt(document.getElementById('sMaxHistory').value),
     memoryInterval: parseInt(document.getElementById('sMemoryInterval').value)
   };
-  await saveConfigToDB(cfg);
+  await saveConfigToDB({...await loadConfig(), ...cfg});
   await updateNavBar();
   showToast('设置已保存');
   setTimeout(() => closeModal('settingsModal'), 150);
@@ -1647,9 +1664,9 @@ function showExportCopyModal(jsonStr, chatCount, memCount) {
   if (!window._oldSettingsContent) window._oldSettingsContent = content.innerHTML;
   content.innerHTML = `
     <p style="text-align:center;font-size:16px;font-weight:700;margin-bottom:12px">📤 导出数据</p>
-    <p style="font-size:13px;color:var(--text-light);margin-bottom:8px">${chatCount} 条聊天 + ${memCount} 条记忆<br>点击「下载」保存为 JSON 文件，或用「复制」手动粘贴</p>
+    <p style="font-size:13px;color:var(--text-light);margin-bottom:8px">${chatCount} 条聊天 + ${memCount} 条记忆<br>点击「保存文件」直接保存到手机下载目录</p>
     <textarea id="exportTextarea" readonly style="width:100%;height:200px;font-size:12px;font-family:monospace;border:1px solid var(--border-color,#ccc);border-radius:8px;padding:8px;resize:none;background:var(--bg,#fff);color:var(--text,#333);box-sizing:border-box;margin-bottom:8px"></textarea>
-    <button class="btn btn-accent" style="width:100%;margin-top:4px" onclick="downloadExportFile()">⬇ 下载 JSON 文件 (UTF-8)</button>
+    <button class="btn btn-accent" style="width:100%;margin-top:4px" onclick="downloadExportFile()">💾 保存文件</button>
     <button class="btn btn-outline" style="width:100%;margin-top:4px" onclick="copyExportedText()">📋 一键复制</button>
     <button class="btn btn-outline" style="width:100%;margin-top:4px" onclick="closeExportModal()">关闭</button>
   `;
@@ -1657,18 +1674,38 @@ function showExportCopyModal(jsonStr, chatCount, memCount) {
 }
 
 function downloadExportFile() {
-  const str = window._exportStr;
+  var str = window._exportStr;
   if (!str) return;
-  const blob = new Blob([str], {type: 'application/json;charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `ai-companion-backup-${new Date().toISOString().slice(0,10)}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-  showToast('正在下载...');
+  // 尝试通过原生插件直接保存到下载目录
+  if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+    window.Capacitor.Plugins.FileSaver.save({data: str}).then(function(res) {
+      if (res && res.success) {
+        showToast('已保存到: ' + (res.path || '下载目录'));
+      } else {
+        _copyFallback();
+      }
+    }).catch(function(e) {
+      _copyFallback();
+    });
+  } else {
+    _copyFallback();
+  }
+  function _copyFallback() {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(str).then(function() {
+          showToast('已复制到剪贴板');
+        }).catch(function() { _domCopy(); });
+      } else { _domCopy(); }
+    } catch(e) { _domCopy(); }
+  }
+  function _domCopy() {
+    try {
+      var ta = document.getElementById('exportTextarea');
+      if (ta) { ta.select(); document.execCommand('copy'); }
+      showToast('已复制到剪贴板');
+    } catch(e) { showToast('保存失败，请手动复制'); }
+  }
 }
 
 function copyExportedText() {
@@ -1771,7 +1808,8 @@ async function batchExtractMemories() {
   while (i < history.length) {
     const a = history[i], b = history[i+1];
     if (a.role === 'user') {
-      turns.push([a.content, b && b.role==='assistant'?b.content:'']);
+      const ts = (b && b.role==='assistant') ? (b.timestamp || a.timestamp) : a.timestamp;
+      turns.push({u: a.content, a: b && b.role==='assistant' ? b.content : '', ts: ts || Date.now()});
       i += (b && b.role==='assistant')?2:1;
     } else { i++; }
   }
@@ -1784,8 +1822,10 @@ async function batchExtractMemories() {
   let totalExtracted = 0, errors = 0;
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
-    const contextStr = batch.map(([u, a]) => `用户: ${u}\n${charName}: ${a}`).join('\n\n');
-    const result = await extractMemories(contextStr);
+    const contextStr = batch.map(t => `用户: ${t.u}\n${charName}: ${t.a}`).join('\n\n');
+    // 使用该批次最后一条对话的时间戳
+    const batchTs = batch[batch.length-1].ts;
+    const result = await extractMemories(contextStr, batchTs);
     if (result.status === 'ok') totalExtracted += result.count;
     else if (result.status === 'error' || result.status === 'api_error') errors++;
     btn.textContent = `🧠 提取中 (${b+1}/${batches.length})...`;
@@ -1957,9 +1997,15 @@ async function loadMemoryEditor() {
     container.innerHTML = '<p style="color:var(--muted);text-align:center;padding:20px">暂无长期记忆。<br>聊得多了会自动提取，也可以点「批量提取历史记忆」。</p>';
     return;
   }
+  function fmtTs(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return (d.getMonth()+1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  }
   container.innerHTML = memories.map((m, i) => `
     <div class="mem-item" id="mem-item-${m.id}" style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-color,#eee)">
-      <span style="flex:1;word-break:break-all" id="mem-text-${m.id}">${escHtml(m.content)}</span>
+      <span style="flex:1;word-break:break-all" id="mem-text-${m.id}"><b style="color:var(--primary);margin-right:4px">#${m.id}</b>${escHtml(m.content)}</span>
+      <span style="font-size:10px;color:var(--muted,#999);white-space:nowrap;flex-shrink:0">${fmtTs(m.timestamp)}</span>
       <button class="btn btn-sm" style="padding:2px 6px;font-size:11px;flex-shrink:0" onclick="editMemory(${m.id})" title="编辑">✏️</button>
       <button class="btn btn-sm btn-danger" style="padding:2px 6px;font-size:11px;flex-shrink:0" onclick="deleteMemory(${m.id})" title="删除">✕</button>
     </div>
