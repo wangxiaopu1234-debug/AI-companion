@@ -1,8 +1,11 @@
 // AI 聊天伴侣 - Service Worker
-const CACHE_NAME = 'ai-companion-v2';
+const APP_VERSION = '1.10';
+const CACHE_NAME = 'ai-companion-v' + APP_VERSION;
 const ASSETS = [
   './',
   './index.html',
+  './capacitor.js',
+  './filesystem-plugin.js',
   './manifest.json',
   './icons/icon-72.png',
   './icons/icon-96.png',
