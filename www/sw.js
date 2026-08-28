@@ -1,5 +1,7 @@
 // AI 聊天伴侣 - Service Worker
-const APP_VERSION = '1.10';
+// 版本号从注册 URL 的 ?v= 参数读取（index.html 注册时注入），
+// 与前端 APP_VERSION 保持唯一来源，避免手动同步漂移。
+const APP_VERSION = new URL(self.location.href).searchParams.get('v') || '1.12.2';
 const CACHE_NAME = 'ai-companion-v' + APP_VERSION;
 const ASSETS = [
   './',

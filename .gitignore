@@ -36,3 +36,6 @@ temp/
 
 # APK build outputs (use GitHub Releases for APK distribution)
 *.apk
+
+# WorkBuddy project data (local workspace memory, not for distribution)
+.workbuddy/

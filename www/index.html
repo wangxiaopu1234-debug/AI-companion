@@ -65,6 +65,7 @@ body.modal-open{overflow:hidden;}
 }
 .nav-name{font-size:16px;font-weight:600;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .nav-sub{font-size:11px;color:var(--text-light);}
+.turn-badge{font-size:10px;line-height:1;color:var(--text-light);background:var(--primary-lighter);border-radius:8px;padding:2px 6px;white-space:nowrap;flex-shrink:0;}
 .nav-actions{display:flex;gap:6px;margin-top:4px;}
 .nav-btn{
   width:36px;height:36px;border-radius:50%;border:none;background:var(--card);
@@ -358,7 +359,10 @@ body.modal-open{overflow:hidden;}
     <div class="nav-avatar" id="navAvatar">✨</div>
     <div>
       <div class="nav-name" id="navName">未命名</div>
-      <div class="nav-sub" id="navStatus">需要配置</div>
+      <div style="display:flex;align-items:center;gap:5px;min-height:13px">
+        <div class="nav-sub" id="navStatus">需要配置</div>
+        <span class="turn-badge" id="turnBadge" style="display:none"></span>
+      </div>
     </div>
   </div>
   <div class="nav-actions">
@@ -514,6 +518,23 @@ body.modal-open{overflow:hidden;}
   <div class="form-section">
     <div class="form-section-title">API 配置</div>
     <div class="form-group">
+      <label>配置方案</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="sApiProfile" onchange="selectApiProfile(this.value)" style="flex:1">
+          <option value="">当前配置</option>
+        </select>
+        <button class="btn btn-outline btn-sm" onclick="deleteApiProfile()" title="删除当前方案">删除</button>
+      </div>
+      <div class="hint">可保存多组 API 地址、Key 和模型，切换方案即可更换服务商</div>
+    </div>
+    <div class="form-group">
+      <label>方案名称</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="sApiProfileName" placeholder="例如：DeepSeek / OpenAI" style="flex:1">
+        <button class="btn btn-outline btn-sm" onclick="saveApiProfile()">保存方案</button>
+      </div>
+    </div>
+    <div class="form-group">
       <label>API Key</label>
       <input type="password" id="sApiKey" placeholder="sk-...">
       <div class="hint">支持 DeepSeek 及所有兼容 OpenAI 格式的 API</div>
@@ -585,7 +606,9 @@ body.modal-open{overflow:hidden;}
     </div>
     <div class="btn-row" style="margin-top:8px">
       <button class="btn btn-outline btn-sm" onclick="batchExtractMemories()" id="batchExtractBtn">🧠 批量提取历史记忆</button>
+      <input type="number" id="manualExtractTurns" min="0" step="1" placeholder="全部" title="提取最近 N 轮对话，留空或 0 = 全部" style="width:76px;padding:4px 8px;border:1px solid var(--border-color,#ddd);border-radius:6px;font-size:13px">
     </div>
+    <div class="hint" style="margin-top:4px">提取最近 N 轮对话（留空或 0 = 全部）；已提取的轮次不会被自动记忆重复提取</div>
     <div class="btn-row" style="margin-top:8px">
       <button class="btn btn-danger btn-sm" onclick="confirmClear('memory')">清除长期记忆</button>
       <button class="btn btn-danger btn-sm" onclick="confirmClear('history')">清除对话历史</button>
@@ -596,7 +619,7 @@ body.modal-open{overflow:hidden;}
     <div class="btn-row" style="margin-top:8px">
       <button class="btn btn-outline btn-sm" onclick="checkForUpdate()">🔄 检查更新</button>
     </div>
-    <div style="text-align:center;font-size:11px;color:var(--muted);margin-top:12px" id="versionDisplay">v1.10</div>
+    <div style="text-align:center;font-size:11px;color:var(--muted);margin-top:12px" id="versionDisplay">v1.12.2</div>
   </div>
 
   <div class="form-section" style="margin-top:20px">
@@ -631,7 +654,7 @@ body.modal-open{overflow:hidden;}
 // ============================================================
 // 版本管理
 // ============================================================
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.12.2';
 
 // ============================================================
 // PWA & Service Worker
@@ -641,7 +664,7 @@ let swRegistration = null;
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').then((reg) => {
+    navigator.serviceWorker.register('./sw.js?v=' + APP_VERSION).then((reg) => {
       swRegistration = reg;
       console.log('[PWA] Service Worker registered');
       // Check for updates
@@ -773,6 +796,16 @@ const DB_NAME = 'ai_companion';
 const DB_VERSION = 1;
 let db = null;
 let dbReady = false;
+const STORAGE_FALLBACK_FLAG = 'ai_companion_storage_fallback';
+const STORAGE_MIRROR_VERSION = '1';
+
+function disableDB(error) {
+  if (error) console.warn('IndexedDB 已停用，本次会话改用 localStorage:', error);
+  try { if (db) db.close(); } catch(e) {}
+  db = null;
+  dbReady = false;
+  try { localStorage.setItem(STORAGE_FALLBACK_FLAG, '1'); } catch(e) {}
+}
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -790,9 +823,69 @@ function openDB() {
           d.createObjectStore('config', { keyPath: 'key' });
       };
       req.onsuccess = (e) => { db = e.target.result; dbReady = true; resolve(db); };
-      req.onerror = () => { dbReady = false; reject(req.error); };
-    } catch (e) { dbReady = false; reject(e); }
+      req.onerror = () => { disableDB(req.error); reject(req.error); };
+    } catch (e) { disableDB(e); reject(e); }
   });
+}
+
+async function repairDBFromFallback() {
+  if (!dbReady || !db || localStorage.getItem(STORAGE_FALLBACK_FLAG) !== '1') return;
+  try {
+    for (const store of ['chat_history', 'memories']) {
+      const fallbackData = lsLoad(store);
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        const objectStore = tx.objectStore(store);
+        objectStore.clear();
+        for (const item of fallbackData) objectStore.put(item);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    }
+    const configRaw = localStorage.getItem('ai_companion_config');
+    const personaRaw = localStorage.getItem('ai_companion_persona');
+    if (configRaw) await dbPut('config',{key:'settings',value:JSON.parse(configRaw)});
+    if (personaRaw) await dbPut('config',{key:'persona',value:JSON.parse(personaRaw)});
+    localStorage.removeItem(STORAGE_FALLBACK_FLAG);
+  } catch(e) {
+    disableDB(e);
+    throw e;
+  }
+}
+
+async function initializeStorageMirror() {
+  if (!dbReady || !db || localStorage.getItem('ai_companion_storage_mirror') === STORAGE_MIRROR_VERSION) return;
+  try {
+    for (const [store, limit] of [['chat_history', LS_CHAT_MAX], ['memories', LS_MEMO_MAX]]) {
+      const dbItems = (await dbGetAll(store, null, null, limit, true)).reverse();
+      const fallbackItems = lsLoad(store);
+      if (dbItems.length === 0 && fallbackItems.length > 0) {
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(store, 'readwrite');
+          const objectStore = tx.objectStore(store);
+          for (const item of fallbackItems) objectStore.put(item);
+          tx.oncomplete = resolve;
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        });
+      } else {
+        lsSave(store, dbItems);
+      }
+    }
+
+    const configRaw = localStorage.getItem('ai_companion_config');
+    const personaRaw = localStorage.getItem('ai_companion_persona');
+    const settings = await dbGet('config', 'settings');
+    const persona = await dbGet('config', 'persona');
+    if (settings) localStorage.setItem('ai_companion_config', JSON.stringify(settings.value));
+    else if (configRaw) await dbPut('config',{key:'settings',value:JSON.parse(configRaw)});
+    if (persona) localStorage.setItem('ai_companion_persona', JSON.stringify(persona.value));
+    else if (personaRaw) await dbPut('config',{key:'persona',value:JSON.parse(personaRaw)});
+    localStorage.setItem('ai_companion_storage_mirror', STORAGE_MIRROR_VERSION);
+  } catch(e) {
+    console.warn('初始化兼容存储镜像失败:', e);
+  }
 }
 
 function checkDB() {
@@ -805,7 +898,7 @@ function dbGet(store, key) {
     const tx = db.transaction(store, 'readonly');
     const req = tx.objectStore(store).get(key);
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => { disableDB(req.error); reject(req.error); };
   });
 }
 
@@ -815,7 +908,7 @@ function dbPut(store, data) {
     const tx = db.transaction(store, 'readwrite');
     const req = tx.objectStore(store).put(data);
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => { disableDB(req.error); reject(req.error); };
   });
 }
 
@@ -867,6 +960,7 @@ function dbAdd(store, data) {
       resolve(req.result);
     };
     req.onerror = () => {
+      disableDB(req.error);
       const arr = lsLoad(store);
       const item = { ...data, id: lsNextId() };
       arr.push(item);
@@ -885,7 +979,7 @@ function dbGetAll(store, index, query, limit, reverse) {
       return;
     }
     const tx = db.transaction(store, 'readonly');
-    tx.onerror = () => { let arr = lsLoad(store); if (reverse) arr = arr.slice().reverse(); resolve(arr.slice(0, limit || 500)); };
+    tx.onerror = () => { disableDB(tx.error); let arr = lsLoad(store); if (reverse) arr = arr.slice().reverse(); resolve(arr.slice(0, limit || 500)); };
     const s = tx.objectStore(store);
     const req = reverse ? s.openCursor(null, 'prev') : s.openCursor();
     const results = [];
@@ -897,6 +991,7 @@ function dbGetAll(store, index, query, limit, reverse) {
       } else { resolve(results); }
     };
     req.onerror = () => {
+      disableDB(req.error);
       let arr = lsLoad(store);
       if (reverse) arr = arr.slice().reverse();
       resolve(arr.slice(0, limit || 500));
@@ -904,21 +999,25 @@ function dbGetAll(store, index, query, limit, reverse) {
   });
 }
 
-function dbClear(store) {
-  return new Promise((resolve, reject) => {
-    try { checkDB(); } catch(e) {
-      localStorage.removeItem(store === 'chat_history' ? LS_CHAT_KEY : LS_MEMO_KEY);
-      resolve();
-      return;
-    }
-    const tx = db.transaction(store, 'readwrite');
-    const req = tx.objectStore(store).clear();
-    req.onsuccess = () => {
-      localStorage.removeItem(store === 'chat_history' ? LS_CHAT_KEY : LS_MEMO_KEY);
-      resolve();
-    };
-    req.onerror = () => reject(req.error);
-  });
+async function dbClear(store) {
+  let cleared = false;
+  let lastError = null;
+  if (dbReady && db) {
+    try {
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        const req = tx.objectStore(store).clear();
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+      });
+      cleared = true;
+    } catch(e) { lastError = e; disableDB(e); }
+  }
+  try {
+    localStorage.removeItem(store === 'chat_history' ? LS_CHAT_KEY : LS_MEMO_KEY);
+    cleared = true;
+  } catch(e) { lastError = lastError || e; }
+  if (!cleared) throw lastError || new Error('清除存储失败');
 }
 
 async function dbRemoveMessages(store, ids) {
@@ -926,13 +1025,13 @@ async function dbRemoveMessages(store, ids) {
   if (dbReady && db) {
     for (const id of ids) {
       try {
-        await new Promise((resolve) => {
+        await new Promise((resolve, reject) => {
           const tx = db.transaction(store, 'readwrite');
           const req = tx.objectStore(store).delete(id);
           req.onsuccess = () => resolve();
-          req.onerror = () => resolve();
+          req.onerror = () => reject(req.error);
         });
-      } catch(e) {}
+      } catch(e) { disableDB(e); break; }
     }
   }
   try {
@@ -947,7 +1046,8 @@ async function dbRemoveMessages(store, ids) {
 // ============================================================
 const DEFAULT_CONFIG = {
   apiKey:'',apiBase:'https://api.deepseek.com',model:'deepseek-chat',
-  temperature:0.8,maxTokens:4096,maxHistory:20,memoryInterval:10,lastMemoryRound:0
+  temperature:0.8,maxTokens:4096,maxHistory:20,memoryInterval:10,lastMemoryRound:0,
+  apiProfiles:[],activeApiProfileId:''
 };
 const DEFAULT_PERSONA = {
   name:'',species:'',avatar:'',scene:'',traits:[],customTraits:'',
@@ -956,39 +1056,84 @@ const DEFAULT_PERSONA = {
 };
 
 async function loadConfig() {
-  try {
-    checkDB();
-    const r = await dbGet('config','settings');
-    return r ? {...DEFAULT_CONFIG,...r.value} : DEFAULT_CONFIG;
-  } catch(e) {
+  if (dbReady && db) {
     try {
-      const saved = localStorage.getItem('ai_companion_config');
-      return saved ? {...DEFAULT_CONFIG,...JSON.parse(saved)} : DEFAULT_CONFIG;
-    } catch(e2) { return DEFAULT_CONFIG; }
+      const r = await dbGet('config','settings');
+      if (r) return {...DEFAULT_CONFIG,...r.value};
+    } catch(e) { console.warn('IndexedDB 配置读取失败，改用 localStorage:', e); }
   }
+  try {
+    const saved = localStorage.getItem('ai_companion_config');
+    return saved ? {...DEFAULT_CONFIG,...JSON.parse(saved)} : {...DEFAULT_CONFIG};
+  } catch(e) { return {...DEFAULT_CONFIG}; }
 }
 
 async function saveConfigToDB(cfg) {
-  try { checkDB(); await dbPut('config',{key:'settings',value:cfg}); }
-  catch(e) { try { localStorage.setItem('ai_companion_config',JSON.stringify(cfg)); } catch(e2){} }
+  let saved = false;
+  let lastError = null;
+  if (dbReady && db) {
+    try { await dbPut('config',{key:'settings',value:cfg}); saved = true; }
+    catch(e) { lastError = e; }
+  }
+  try { localStorage.setItem('ai_companion_config',JSON.stringify(cfg)); saved = true; }
+  catch(e) { lastError = lastError || e; }
+  if (!saved) throw lastError || new Error('配置保存失败');
 }
 
 async function loadPersona() {
-  try {
-    checkDB();
-    const r = await dbGet('config','persona');
-    return r ? {...DEFAULT_PERSONA,...r.value} : DEFAULT_PERSONA;
-  } catch(e) {
+  if (dbReady && db) {
     try {
-      const saved = localStorage.getItem('ai_companion_persona');
-      return saved ? {...DEFAULT_PERSONA,...JSON.parse(saved)} : DEFAULT_PERSONA;
-    } catch(e2) { return DEFAULT_PERSONA; }
+      const r = await dbGet('config','persona');
+      if (r) return {...DEFAULT_PERSONA,...r.value};
+    } catch(e) { console.warn('IndexedDB 人设读取失败，改用 localStorage:', e); }
   }
+  try {
+    const saved = localStorage.getItem('ai_companion_persona');
+    return saved ? {...DEFAULT_PERSONA,...JSON.parse(saved)} : {...DEFAULT_PERSONA};
+  } catch(e) { return {...DEFAULT_PERSONA}; }
 }
 
 async function savePersonaToDB(p) {
-  try { checkDB(); await dbPut('config',{key:'persona',value:p}); }
-  catch(e) { try { localStorage.setItem('ai_companion_persona',JSON.stringify(p)); } catch(e2){} }
+  let saved = false;
+  let lastError = null;
+  if (dbReady && db) {
+    try { await dbPut('config',{key:'persona',value:p}); saved = true; }
+    catch(e) { lastError = e; }
+  }
+  try { localStorage.setItem('ai_companion_persona',JSON.stringify(p)); saved = true; }
+  catch(e) { lastError = lastError || e; }
+  if (!saved) throw lastError || new Error('人设保存失败');
+}
+
+async function setLastMemoryRound(round) {
+  const config = await loadConfig();
+  config.lastMemoryRound = Math.max(0, Number(round) || 0);
+  await saveConfigToDB(config);
+}
+
+async function syncLastMemoryRoundWithHistory() {
+  const history = await dbGetAll('chat_history', null, null, 5000, false);
+  // 一轮 = 一条用户消息 + 一条 AI 回复；按用户消息数计轮，避免孤儿消息导致轮数低估
+  const currentRound = history.filter(m => m.role === 'user').length;
+  const config = await loadConfig();
+  const currentPointer = Math.max(0, Number(config.lastMemoryRound) || 0);
+  if (currentPointer > currentRound) {
+    config.lastMemoryRound = currentRound;
+    await saveConfigToDB(config);
+  }
+  return currentRound;
+}
+
+// 顶栏对话轮数指示
+async function updateTurnCount() {
+  const el = document.getElementById('turnBadge');
+  if (!el) return;
+  try {
+    const history = await dbGetAll('chat_history', null, null, 5000, false);
+    const turns = history.filter(m => m.role === 'user').length;
+    el.textContent = turns + ' 轮';
+    el.style.display = turns > 0 ? '' : 'none';
+  } catch(e) {}
 }
 
 // ============================================================
@@ -996,7 +1141,7 @@ async function savePersonaToDB(p) {
 // ============================================================
 async function buildSystemPrompt() {
   const persona = await loadPersona();
-  const memories = await dbGetAll('memories',null,null,120,false);
+  const memories = await dbGetAll('memories',null,null,1000,false);
   memories.sort((a,b) => (b.timestamp||0) - (a.timestamp||0)); // 按时间降序：新→旧
   const now = new Date();
   const timeStr = `${now.getFullYear()}年${now.getMonth()+1}月${now.getDate()}日 ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
@@ -1116,16 +1261,12 @@ async function callAIStream(messages, config, onChunk, onFirstToken, signal) {
 // ============================================================
 // Memory Extraction
 // ============================================================
-async function extractMemories(contextStr, conversationTimestamp) {
+async function extractMemories(contextStr, conversationTimestamp, turnCount) {
   const config = await loadConfig();
   if (!config.apiKey) return { status: 'no_api_key' };
   const persona = await loadPersona();
   const charName = persona.name || 'AI角色';
-  const existingMemories = await dbGetAll('memories', null, null, 200, false);
-  existingMemories.sort((a,b) => (b.timestamp||0) - (a.timestamp||0)); // 按时间降序：新→旧
-  const memoriesStr = existingMemories.length > 0
-    ? existingMemories.map((m, idx) => `#${existingMemories.length - idx} ${m.content}`).join('\n')
-    : '（暂无已知信息）';
+  const batchLabel = Math.max(1, Number(turnCount) || 1);
   try {
     const url = (config.apiBase || 'https://api.deepseek.com').replace(/\/$/,'') + '/v1/chat/completions';
     const resp = await fetch(url, {
@@ -1135,60 +1276,43 @@ async function extractMemories(contextStr, conversationTimestamp) {
         model:config.model||'deepseek-chat',
         messages:[{
           role:'system',
-          content:`你是信息提取专家。从 ${charName} 与用户的对话中提取值得长期保留的关键信息。
+          content:`你是对话记忆整理助手。请概括 ${charName} 与用户本批次对话（最近 ${batchLabel} 轮）中具有后续参考价值的主要内容。
 
-# 长期价值判断（核心，必须满足）
-提取的每条信息，10轮对话后依然有参考价值才保留——问自己：若10轮后翻出来，这条信息还能帮助 ${charName} 更好理解用户、做出更合理的回应吗？
-不能 → 不提取。
+# 保留内容
+- 用户较稳定的身份背景、偏好、厌恶、计划或承诺
+- 双方明确发生的重要事件、约定、冲突或关系变化
+- 未来多轮对话中仍能帮助 ${charName} 理解用户的信息
 
-# 提取标准（满足任一即可）
-- 用户关键信息：身份背景、长期偏好、厌恶、计划、承诺
-- 关系关键事件：情感转折、冲突、重要约定、重大互动
-- 角色发展：${charName} 的性格变化、新能力、新关系、重大经历
+# 忽略内容
+- 寒暄、玩笑、重复表达和无关细节
+- 只在当下有效的状态、情绪或操作过程
+- 未经对话明确表达的推测，不得为了丰富记忆而编造
+- 密码、API Key、验证码、支付信息等秘密数据
 
-# 绝不提取（铭记）
-- 临时状态：如"今天好累""网有点卡""刚才说错了"
-- 单纯寒暄、闲聊调侃、即时情绪表达（无长期意义）
-- 单轮对话内的操作细节：如"你说了三句话""你重复了两遍"
-
-# 去重与合并
-<已知信息>
-${memoriesStr}
-</已知信息>
-- 与已知信息重复/相似/已包含的，跳过
-- 新信息与旧记忆冲突时，以对话中的新信息为准
-- 多条相关的小信息，合并为一条
-
-# 输出
-- "- "开头无序列表，每条不超过60字
-- 无新增有价值信息返回空白
-
-示例：
-- ${charName}与用户约定周六去海边。
-- 用户透露自己曾是机甲驾驶员，现已退役。
-- ${charName}发现自己对用户产生了信任。`
+# 输出要求
+- 最多输出一小段自然、客观的中文，不加标题，不列条目，不换行
+- 将相关内容合并成一条主线，不要逐句复述
+- 控制在 60 至 120 个中文字符左右
+- 如果整批对话没有值得长期保留的内容，只输出：NO_MEMORY`
         },{
           role:'user',
           content: contextStr
         }],
-        temperature:0.3,max_tokens:512
+        temperature:0.2,max_tokens:256
       })
     });
     if (!resp.ok) return { status: 'api_error', error: `HTTP ${resp.status}` };
     const data = await resp.json();
-    const result = data.choices[0].message.content.trim();
-    if (!result) return { status: 'nothing' };
-    let count = 0;
+    const rawResult = data.choices?.[0]?.message?.content || '';
+    const result = rawResult.replace(/\s*\n+\s*/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!result || /^NO_MEMORY[。.!！]?$/i.test(result)) return { status: 'nothing' };
+    const summary = result.replace(/^[-*]\s*/, '').trim();
+    if (summary.length <= 2 || summary.length >= 300) return { status: 'nothing' };
     const memTs = conversationTimestamp || Date.now();
-    for (const line of result.split('\n')) {
-      const trimmed = line.replace(/^[-*\d.]+\s*/,'').trim();
-      if (trimmed && trimmed.length>2 && trimmed.length<300) {
-        await dbAdd('memories',{content:trimmed,category:'auto',timestamp:memTs});
-        count++;
-      }
-    }
-    // 记忆上限 300 條，超出時自動刪除最舊的
-    if (count > 0) {
+    const memoryId = await dbAdd('memories',{content:summary,category:'auto',timestamp:memTs});
+
+    // 记忆上限 300 条，超出时自动删除最旧的
+    {
       const allMems = await dbGetAll('memories', null, null, 1000, false);
       allMems.sort((a,b) => (a.timestamp||0) - (b.timestamp||0)); // 按时间升序，删除最旧的
       if (allMems.length > 300) {
@@ -1196,7 +1320,7 @@ ${memoriesStr}
         for (const m of toDelete) await dbDelete('memories', m.id);
       }
     }
-    return count > 0 ? { status: 'ok', count } : { status: 'nothing' };
+    return { status: 'ok', count: 1, memoryId: memoryId };
   } catch(e) {
     return { status: 'error', error: e.message };
   }
@@ -1207,10 +1331,24 @@ ${memoriesStr}
 // ============================================================
 let isWaiting = false;
 let abortController = null;
+let chatHistoryRevision = 0;
 
 async function send() {
   const input = document.getElementById('msgInput');
   const sendBtn = document.getElementById('sendBtn');
+  let timeoutId = null;
+  const clearRequestTimeout = () => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+  };
+  const resetRequestTimeout = () => {
+    clearRequestTimeout();
+    timeoutId = setTimeout(() => {
+      if (abortController) abortController.abort();
+    }, 180000);
+  };
   try {
     if (isWaiting) return;
     const msg = input.value.trim();
@@ -1231,16 +1369,18 @@ async function send() {
 
     const sysPrompt = await buildSystemPrompt();
     const messages = [{role:'system',content:sysPrompt}];
-    const history = await dbGetAll('chat_history',null,null,config.maxHistory,true);
+    const historyLimit = Math.max(1, Number(config.maxHistory) || 20) * 2;
+    const history = await dbGetAll('chat_history',null,null,historyLimit,true);
     for (const h of history.reverse()) messages.push({role:h.role,content:h.content});
 
     abortController = new AbortController();
-    const timeoutId = setTimeout(() => abortController.abort(), 180000);
+    resetRequestTimeout();
 
     let aiBubble = null, aiBubbleInner = null, fullReply = '';
 
     const reply = await callAIStream(messages, config,
       (chunk, full) => {
+        resetRequestTimeout();
         fullReply = full;
         if (aiBubbleInner) {
           aiBubbleInner.innerHTML = escapeHtml(fullReply).replace(/\n/g,'<br>');
@@ -1248,7 +1388,7 @@ async function send() {
         }
       },
       () => {
-        clearTimeout(timeoutId);
+        resetRequestTimeout();
         removeTyping(typingEl);
         const wrap = document.getElementById('chatWrap');
         const div = document.createElement('div');
@@ -1261,7 +1401,7 @@ async function send() {
       abortController.signal
     );
 
-    clearTimeout(timeoutId);
+    clearRequestTimeout();
 
     if (!aiBubble && typingEl) removeTyping(typingEl);
 
@@ -1281,31 +1421,79 @@ async function send() {
     // Auto memory extraction — 基于上次提取轮次追踪
     const interval = config.memoryInterval || 0;
     if (interval > 0 && fullReply) {
-      const allHistory = await dbGetAll('chat_history',null,null,1000,true);
-      const roundCount = Math.floor(allHistory.length/2);
+      // 读取上限与 syncLastMemoryRoundWithHistory 保持一致（5000），否则历史超过 1000 条后
+      // roundCount 会被封顶，指针永远追不上，自动提取静默停摆
+      const allHistory = await dbGetAll('chat_history',null,null,5000,true);
+      const totalMsgs = allHistory.length;
+      const roundCount = allHistory.filter(m => m.role === 'user').length;
       const lastRound = config.lastMemoryRound || 0;
-      if (roundCount - lastRound >= interval) {
-        // 取最近 interval 轮完整对话
-        const recent = allHistory.slice(0, interval * 2).reverse();
+      const pending = roundCount - lastRound;
+      if (pending >= interval) {
         const persona = await loadPersona();
         const charName = persona.name || 'AI';
-        const contextStr = recent.map(m =>
-          `${m.role === 'user' ? '用户' : charName}: ${m.content}`
-        ).join('\n');
-        // 使用对话中最后一条消息的时间戳
-        const convTs = recent.length > 0 ? (recent[recent.length-1].timestamp || Date.now()) : Date.now();
-        extractMemories(contextStr, convTs).then(async r => {
-          // 无论提取结果如何，指针都要前进，避免重复提取同一批对话
-          config.lastMemoryRound = roundCount;
-          await saveConfigToDB(config);
-          if (r.status === 'ok') {
-            showToast(`🧠 记忆已更新 (+${r.count})`);
+        const extractionRevision = chatHistoryRevision;
+        // 待提取轮次从旧到新分批追赶，每批 interval 轮；单次最多 5 批，更早的轮次跳过
+        const cappedPending = Math.min(pending, interval * 5);
+        // 只处理整批（每批 interval 轮），零头留给下次合并，避免为零星几轮单独调 API
+        const fullBatches = Math.floor(cappedPending / interval);
+        const runExtraction = async () => {
+          let completedRounds = 0, extracted = 0;
+          const memoryIds = [];
+          for (let b = 0; b < fullBatches; b++) {
+            const done = b * interval;
+            // 第 (lastRound+done) 轮之后 interval 轮，在"旧→新"全历史中的消息区间 [fromOld, endOld)
+            const fromOld = (lastRound + done) * 2;
+            const endOld = Math.min(fromOld + interval * 2, totalMsgs);
+            if (endOld <= fromOld) break;
+            // allHistory 为 新→旧 排列，映射为数组索引区间
+            const batch = allHistory.slice(totalMsgs - endOld, totalMsgs - fromOld).reverse();
+            if (batch.length === 0) break;
+            const contextStr = batch.map(m =>
+              `${m.role === 'user' ? '用户' : charName}: ${m.content}`
+            ).join('\n');
+            // 使用该批次最后一条消息的时间戳
+            const convTs = batch[batch.length-1].timestamp || Date.now();
+            const turnCount = batch.filter(m => m.role === 'user').length;
+            const r = await extractMemories(contextStr, convTs, turnCount);
+            // API 失败时立即停止：指针不推进（或只推进已完成部分），下轮对话后重试
+            if (r.status === 'api_error' || r.status === 'error' || r.status === 'no_api_key') {
+              return { failed: true, completedRounds, extracted, memoryIds };
+            }
+            if (r.status === 'ok') {
+              extracted += r.count;
+              if (r.memoryId != null) memoryIds.push(r.memoryId);
+            }
+            completedRounds = done + interval;
           }
-          else if (r.status === 'api_error') console.log('记忆提取 API 错误:', r.error);
-        }).catch(() => {});
+          return { failed: false, completedRounds, extracted, memoryIds };
+        };
+        runExtraction().then(async res => {
+          if (extractionRevision !== chatHistoryRevision) {
+            // 撤回或重置发生在提取期间，丢弃基于旧历史生成的摘要。
+            for (const id of res.memoryIds) await dbDelete('memories', id);
+            return;
+          }
+          const currentRound = await syncLastMemoryRoundWithHistory();
+          const latestConfig = await loadConfig();
+          if (res.failed) {
+            // 失败：只推进已成功处理的轮数，剩余的下轮重试
+            if (res.completedRounds > 0) {
+              latestConfig.lastMemoryRound = Math.min(lastRound + res.completedRounds, currentRound);
+              await saveConfigToDB(latestConfig);
+            }
+            showToast('🧠 记忆提取失败，将在下次对话后重试');
+            return;
+          }
+          latestConfig.lastMemoryRound = Math.min(lastRound + res.completedRounds, currentRound);
+          await saveConfigToDB(latestConfig);
+          if (res.extracted > 0) showToast(`🧠 记忆已更新 (+${res.extracted})`);
+        }).catch(() => {
+          showToast('🧠 记忆提取失败，将在下次对话后重试');
+        });
       }
     }
   } catch(e) {
+    clearRequestTimeout();
     document.querySelectorAll('.msg.ai.typing').forEach(el => el.remove());
     const streamingBubble = document.querySelector('.msg.ai.streaming');
     if (streamingBubble) streamingBubble.remove();
@@ -1315,10 +1503,12 @@ async function send() {
     addMessage('ai', errMsg);
     scrollBottom();
   } finally {
+    clearRequestTimeout();
     isWaiting = false;
     sendBtn.disabled = false;
     abortController = null;
     input.focus();
+    updateTurnCount();
   }
 }
 
@@ -1376,6 +1566,17 @@ function showToast(msg, duration = 2500) {
   setTimeout(() => toast.remove(), duration);
 }
 
+function resetChatView() {
+  const wrap = document.getElementById('chatWrap');
+  const welcome = document.getElementById('welcomeCard');
+  if (!wrap || !welcome) return;
+  wrap.querySelectorAll('.msg').forEach(el => el.remove());
+  welcome.style.display = '';
+  if (welcome.parentElement !== wrap) wrap.appendChild(welcome);
+  document.getElementById('scrollFab').classList.remove('show');
+  wrap.scrollTop = 0;
+}
+
 // Scroll FAB
 const chatWrap = document.getElementById('chatWrap');
 chatWrap.addEventListener('scroll', () => {
@@ -1404,7 +1605,10 @@ async function recallMessage(userId, btnEl) {
     const divIdx = allDivs.indexOf(msgEl);
     const toRemoveDivs = divIdx >= 0 ? allDivs.slice(divIdx) : [];
 
+    chatHistoryRevision++;
     await dbRemoveMessages('chat_history', toRemove);
+    await syncLastMemoryRoundWithHistory();
+    updateTurnCount();
     for (const el of toRemoveDivs) {
       el.style.transition = 'opacity .2s, transform .2s';
       el.style.opacity = '0'; el.style.transform = 'scale(0.95)';
@@ -1476,20 +1680,21 @@ async function startEditMessage(msgId, btnEl) {
 }
 
 async function dbUpdateMessage(msgId, newContent) {
-  if (!dbReady) {
-    const all = lsLoad('chat_history');
-    const item = all.find(m => m.id === msgId);
-    if (item) { item.content = newContent; lsSave('chat_history', all); }
-    return;
+  if (dbReady && db) {
+    try {
+      const tx = db.transaction('chat_history', 'readwrite');
+      tx.objectStore('chat_history').get(msgId).onsuccess = (e) => {
+        const item = e.target.result;
+        if (!item) return;
+        item.content = newContent;
+        tx.objectStore('chat_history').put(item);
+      };
+      await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
+    } catch(e) { disableDB(e); }
   }
-  const tx = db.transaction('chat_history', 'readwrite');
-  tx.objectStore('chat_history').get(msgId).onsuccess = (e) => {
-    const item = e.target.result;
-    if (!item) return;
-    item.content = newContent;
-    tx.objectStore('chat_history').put(item);
-  };
-  await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
+  const all = lsLoad('chat_history');
+  const item = all.find(m => m.id === msgId);
+  if (item) { item.content = newContent; lsSave('chat_history', all); }
 }
 
 // ============================================================
@@ -1605,7 +1810,7 @@ async function savePersona() {
   if (wc && wc.style.display !== 'none') {
     renderAvatar('welcomeAvatar', persona.avatar, persona.emoji);
     document.getElementById('welcomeName').textContent = persona.name || 'AI 聊天伴侣';
-    document.getElementById('welcomeDesc').innerHTML = persona.species || '你的专属AI伙伴';
+    document.getElementById('welcomeDesc').textContent = persona.species || '你的专属AI伙伴';
   }
   updateNavBar().catch(()=>{});
   showToast('人设已保存');
@@ -1617,31 +1822,139 @@ async function savePersona() {
 // ============================================================
 async function loadSettingsToForm() {
   const c = await loadConfig();
-  document.getElementById('sApiKey').value = c.apiKey || '';
-  document.getElementById('sApiBase').value = c.apiBase || 'https://api.deepseek.com';
-  document.getElementById('sModel').value = c.model || 'deepseek-chat';
-  document.getElementById('sTemp').value = c.temperature || 0.8;
-  document.getElementById('tempVal').textContent = c.temperature || 0.8;
-  document.getElementById('sMaxTokens').value = c.maxTokens || 4096;
-  document.getElementById('maxTokensVal').textContent = c.maxTokens || 4096;
-  document.getElementById('sMaxHistory').value = c.maxHistory || 20;
-  document.getElementById('sMemoryInterval').value = c.memoryInterval || 10;
+  renderApiProfiles(c);
+  const active = getApiProfile(c, c.activeApiProfileId);
+  setApiFormValues(active || c);
+  document.getElementById('sTemp').value = c.temperature ?? 0.8;
+  document.getElementById('tempVal').textContent = c.temperature ?? 0.8;
+  document.getElementById('sMaxTokens').value = c.maxTokens ?? 4096;
+  document.getElementById('maxTokensVal').textContent = c.maxTokens ?? 4096;
+  document.getElementById('sMaxHistory').value = c.maxHistory ?? 20;
+  document.getElementById('sMemoryInterval').value = c.memoryInterval ?? 10;
   document.getElementById('sTheme').value = localStorage.getItem('ai_companion_theme') || 'light';
 }
 
+function getApiProfiles(config) {
+  return Array.isArray(config.apiProfiles) ? config.apiProfiles : [];
+}
+
+function getApiProfile(config, id) {
+  if (!id) return null;
+  return getApiProfiles(config).find(profile => profile.id === id) || null;
+}
+
+function setApiFormValues(source) {
+  document.getElementById('sApiKey').value = source.apiKey || '';
+  document.getElementById('sApiBase').value = source.apiBase || 'https://api.deepseek.com';
+  document.getElementById('sModel').value = source.model || 'deepseek-chat';
+}
+
+function getApiFormValues() {
+  return {
+    apiKey: document.getElementById('sApiKey').value.trim(),
+    apiBase: document.getElementById('sApiBase').value.trim().replace(/\/v1\/?$/, ''),
+    model: document.getElementById('sModel').value.trim()
+  };
+}
+
+function renderApiProfiles(config) {
+  const select = document.getElementById('sApiProfile');
+  if (!select) return;
+  select.textContent = '';
+  const current = document.createElement('option');
+  current.value = '';
+  current.textContent = '当前配置';
+  select.appendChild(current);
+  for (const profile of getApiProfiles(config)) {
+    const option = document.createElement('option');
+    option.value = profile.id;
+    option.textContent = profile.name || profile.model || '未命名方案';
+    select.appendChild(option);
+  }
+  select.value = config.activeApiProfileId || '';
+  const active = getApiProfile(config, config.activeApiProfileId);
+  document.getElementById('sApiProfileName').value = active ? (active.name || '') : '';
+}
+
+async function selectApiProfile(profileId) {
+  const config = await loadConfig();
+  const profile = getApiProfile(config, profileId);
+  if (!profile) {
+    document.getElementById('sApiProfileName').value = '';
+    return;
+  }
+  const nextConfig = {
+    ...config,
+    ...profile,
+    apiProfiles: getApiProfiles(config),
+    activeApiProfileId: profile.id
+  };
+  delete nextConfig.id;
+  delete nextConfig.name;
+  await saveConfigToDB(nextConfig);
+  setApiFormValues(profile);
+  document.getElementById('sApiProfileName').value = profile.name || '';
+  await updateNavBar();
+  showToast('已切换到：' + (profile.name || profile.model || '未命名方案'));
+}
+
+async function saveApiProfile() {
+  const config = await loadConfig();
+  const profileId = document.getElementById('sApiProfile').value;
+  const name = document.getElementById('sApiProfileName').value.trim();
+  if (!name) { showToast('请先填写方案名称'); return; }
+  const fields = getApiFormValues();
+  const profiles = getApiProfiles(config).map(profile => ({...profile}));
+  let target = profiles.find(profile => profile.id === profileId);
+  if (target) {
+    Object.assign(target, fields, {name});
+  } else {
+    target = {id:'api-' + Date.now(), name, ...fields};
+    profiles.push(target);
+  }
+  await saveConfigToDB({...config, ...fields, apiProfiles:profiles, activeApiProfileId:target.id});
+  await loadSettingsToForm();
+  await updateNavBar();
+  showToast('API 方案已保存');
+}
+
+async function deleteApiProfile() {
+  const config = await loadConfig();
+  const profileId = document.getElementById('sApiProfile').value;
+  if (!profileId) { showToast('请先选择要删除的方案'); return; }
+  const profile = getApiProfile(config, profileId);
+  if (!profile || !confirm('确定删除 API 方案「' + (profile.name || '未命名方案') + '」吗？')) return;
+  const profiles = getApiProfiles(config).filter(item => item.id !== profileId);
+  const nextConfig = {...config, apiProfiles:profiles};
+  if (config.activeApiProfileId === profileId) nextConfig.activeApiProfileId = '';
+  await saveConfigToDB(nextConfig);
+  await loadSettingsToForm();
+  showToast('API 方案已删除');
+}
+
 async function saveSettings() {
-  let apiBase = document.getElementById('sApiBase').value.trim().replace(/\/v1\/?$/, '');
+  const apiFields = getApiFormValues();
+  let apiBase = apiFields.apiBase;
   document.getElementById('sApiBase').value = apiBase;
   const cfg = {
-    apiKey: document.getElementById('sApiKey').value.trim(),
+    apiKey: apiFields.apiKey,
     apiBase: apiBase,
-    model: document.getElementById('sModel').value.trim(),
+    model: apiFields.model,
     temperature: parseFloat(document.getElementById('sTemp').value),
     maxTokens: parseInt(document.getElementById('sMaxTokens').value),
     maxHistory: parseInt(document.getElementById('sMaxHistory').value),
     memoryInterval: parseInt(document.getElementById('sMemoryInterval').value)
   };
-  await saveConfigToDB({...await loadConfig(), ...cfg});
+  const existing = await loadConfig();
+  const activeId = document.getElementById('sApiProfile').value;
+  const profiles = getApiProfiles(existing).map(profile => ({...profile}));
+  const active = profiles.find(profile => profile.id === activeId);
+  if (active) {
+    Object.assign(active, apiFields, {
+      name: document.getElementById('sApiProfileName').value.trim() || active.name
+    });
+  }
+  await saveConfigToDB({...existing, ...cfg, apiProfiles:profiles, activeApiProfileId:active ? active.id : ''});
   await updateNavBar();
   showToast('设置已保存');
   setTimeout(() => closeModal('settingsModal'), 150);
@@ -1811,6 +2124,7 @@ async function importData(event) {
     // 兼容 v1 格式（chatHistory 不存在，只有 historyCount）
     // 兼容 v2+ 格式（chatHistory 是完整数组）
     if (data.chatHistory && Array.isArray(data.chatHistory)) {
+      chatHistoryRevision++;
       await dbClear('chat_history');
       for (const h of data.chatHistory)
         await dbAdd('chat_history',{role:h.role,content:h.content,timestamp:h.timestamp||Date.now()});
@@ -1821,18 +2135,16 @@ async function importData(event) {
       const existing = await loadConfig();
       await saveConfigToDB({...existing,...data.config});
     }
+    if (data.chatHistory && Array.isArray(data.chatHistory)) {
+      await setLastMemoryRound(data.chatHistory.filter(h => h.role === 'user').length);
+    }
     await updateNavBar();
     // 等 IndexedDB 事务提交完成后再刷新界面
     await new Promise(r => setTimeout(r, 200));
     // 刷新聊天界面
-    const wrap = document.getElementById('chatWrap');
-    wrap.innerHTML = '';
-    const welcome = document.getElementById('welcomeCard');
-    if (welcome) {
-      welcome.style.display = '';
-      wrap.appendChild(welcome);
-    }
+    resetChatView();
     await restoreChatHistory();
+    await updateTurnCount();
     showToast(`导入成功：${chatCount} 条聊天 + ${memCount} 条记忆`);
     closeModal('settingsModal');
   } catch(e) {
@@ -1863,9 +2175,14 @@ async function batchExtractMemories() {
     } else { i++; }
   }
   if (turns.length === 0) { showToast('没有找到有效的对话轮次'); return; }
+  // 提取范围：最近 N 轮（输入框留空或 0 = 全部）
+  const inputEl = document.getElementById('manualExtractTurns');
+  const rawN = inputEl ? parseInt(inputEl.value, 10) : NaN;
+  const nTurns = (isNaN(rawN) || rawN <= 0) ? turns.length : Math.min(rawN, turns.length);
+  const targetTurns = turns.slice(-nTurns);
   const batchSize = 5;
   const batches = [];
-  for (let t = 0; t < turns.length; t += batchSize) batches.push(turns.slice(t, t + batchSize));
+  for (let t = 0; t < targetTurns.length; t += batchSize) batches.push(targetTurns.slice(t, t + batchSize));
   const btn = document.getElementById('batchExtractBtn');
   btn.disabled = true; btn.textContent = `🧠 提取中 (0/${batches.length})...`;
   let totalExtracted = 0, errors = 0;
@@ -1874,7 +2191,7 @@ async function batchExtractMemories() {
     const contextStr = batch.map(t => `用户: ${t.u}\n${charName}: ${t.a}`).join('\n\n');
     // 使用该批次最后一条对话的时间戳
     const batchTs = batch[batch.length-1].ts;
-    const result = await extractMemories(contextStr, batchTs);
+    const result = await extractMemories(contextStr, batchTs, batch.length);
     if (result.status === 'ok') totalExtracted += result.count;
     else if (result.status === 'error' || result.status === 'api_error') errors++;
     btn.textContent = `🧠 提取中 (${b+1}/${batches.length})...`;
@@ -1884,6 +2201,15 @@ async function batchExtractMemories() {
   let msg = `提取完成：${totalExtracted} 条记忆`;
   if (errors > 0) msg += `，${errors} 批次失败`;
   showToast(msg);
+  // 已处理的轮次推进指针，自动记忆不再重复提取同样的对话
+  // （只要有批次成功处理就推进；全部失败则保留原指针以便重试）
+  if (batches.length > 0 && errors < batches.length) {
+    const freshHistory = await dbGetAll('chat_history',null,null,5000,false);
+    const currentRound = freshHistory.filter(m => m.role === 'user').length;
+    const latestConfig = await loadConfig();
+    latestConfig.lastMemoryRound = currentRound;
+    await saveConfigToDB(latestConfig);
+  }
 }
 
 // ============================================================
@@ -1902,11 +2228,11 @@ document.getElementById('confirmBtn').addEventListener('click', async () => {
   if (confirmAction === 'memory') {
     await dbClear('memories'); showToast('长期记忆已清除');
   } else if (confirmAction === 'history') {
+    chatHistoryRevision++;
     await dbClear('chat_history');
-    document.getElementById('chatWrap').innerHTML = '';
-    const welcome = document.getElementById('welcomeCard');
-    welcome.style.display = '';
-    document.getElementById('chatWrap').appendChild(welcome);
+    await setLastMemoryRound(0);
+    resetChatView();
+    await updateTurnCount();
     showToast('对话历史已清除');
     closeConfirm();
     closeModal('settingsModal');
@@ -1918,11 +2244,11 @@ document.getElementById('confirmBtn').addEventListener('click', async () => {
 });
 
 async function newConversation() {
+  chatHistoryRevision++;
   await dbClear('chat_history');
-  document.getElementById('chatWrap').innerHTML = '';
-  const welcome = document.getElementById('welcomeCard');
-  welcome.style.display = '';
-  document.getElementById('chatWrap').appendChild(welcome);
+  await setLastMemoryRound(0);
+  resetChatView();
+  await updateTurnCount();
   closeModal('settingsModal');
   // 等弹窗关闭动画完成（~300ms）后再触发开场白，避免 DOM 更新被吞
   await new Promise(r => setTimeout(r, 400));
@@ -1959,20 +2285,25 @@ document.getElementById('sMaxTokens').addEventListener('input', (e) => {
 // ============================================================
 // Start New Conversation
 // ============================================================
+async function addOpeningMessageIfEmpty() {
+  const history = await dbGetAll('chat_history', null, null, 1, true);
+  if (history.length > 0) return false;
+  const persona = await loadPersona();
+  const opening = (persona.opening || '').trim();
+  if (!opening) return false;
+  const msgId = await dbAdd('chat_history',{role:'assistant',content:opening,timestamp:Date.now()});
+  addMessage('ai', opening, msgId);
+  scrollBottom();
+  return true;
+}
+
 async function startConversation() {
   try {
-    const persona = await loadPersona();
     const welcome = document.getElementById('welcomeCard');
     if (!welcome) return;
-    if (persona.opening && persona.opening.trim()) {
-      welcome.style.display = 'none';
-      addMessage('ai', persona.opening.trim());
-      scrollBottom();
-      showToast('开始新对话');
-    } else {
-      welcome.style.display = 'none';
-      showToast('开始对话吧！');
-    }
+    welcome.style.display = 'none';
+    const addedOpening = await addOpeningMessageIfEmpty();
+    showToast(addedOpening ? '开始新对话' : '开始对话吧！');
   } catch(e) { console.log('startConversation error:', e); }
 }
 
@@ -2000,14 +2331,9 @@ async function restoreChatHistory() {
         addMessage('ai', `📜 更早的对话已折叠（共 ${history.length} 条消息，显示最近 200 条）`);
       scrollBottom();
     } else {
-      const persona = await loadPersona();
-      if (persona.opening && persona.opening.trim()) {
-        document.getElementById('welcomeCard').style.display = 'none';
-        addMessage('ai', persona.opening.trim());
-        scrollBottom();
-      }
+      await addOpeningMessageIfEmpty();
     }
-  } catch(e) {}
+  } catch(e) { console.warn('恢复聊天记录失败:', e); }
 }
 
 // ============================================================
@@ -2018,10 +2344,18 @@ async function restoreChatHistory() {
     // Apply saved theme first (before DOM paints fully)
     applyTheme(getTheme());
 
-    await openDB();
+    try {
+      await openDB();
+      await repairDBFromFallback();
+      await initializeStorageMirror();
+    } catch(e) {
+      disableDB(e);
+      showToast('本地数据库不可用，已切换到兼容存储');
+    }
     updateNetworkStatus();
     await updateNavBar();
     await restoreChatHistory();
+    await updateTurnCount();
 
     const config = await loadConfig();
     const persona = await loadPersona();
@@ -2040,7 +2374,7 @@ async function restoreChatHistory() {
 async function loadMemoryEditor() {
   const container = document.getElementById('memoryEditor');
   const countEl = document.getElementById('memoryCount');
-  const memories = await dbGetAll('memories', null, null, 200, false);
+  const memories = await dbGetAll('memories', null, null, 1000, false);
   memories.sort((a,b) => (a.timestamp||0) - (b.timestamp||0)); // 按时间升序：旧→新
   countEl.textContent = memories.length;
   if (memories.length === 0) {
@@ -2052,7 +2386,8 @@ async function loadMemoryEditor() {
     const d = new Date(ts);
     return (d.getMonth()+1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
   }
-  container.innerHTML = memories.map((m, i) => `
+  const visibleMemories = memories.slice(-200);
+  container.innerHTML = visibleMemories.map((m, i) => `
     <div class="mem-item" id="mem-item-${m.id}" style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-color,#eee)">
       <span style="flex:1;word-break:break-all" id="mem-text-${m.id}"><b style="color:var(--primary);margin-right:4px">#${i+1}</b>${escHtml(m.content)}</span>
       <span style="font-size:10px;color:var(--muted,#999);white-space:nowrap;flex-shrink:0">${fmtTs(m.timestamp)}</span>
@@ -2070,9 +2405,22 @@ async function editMemory(id) {
   const mem = all.find(m => m.id === id);
   if (!mem) return;
   const textEl = document.getElementById('mem-text-' + id);
-  textEl.innerHTML = `<input type="text" id="mem-input-${id}" value="${escHtml(mem.content)}" style="width:100%;padding:4px;border:1px solid var(--accent);border-radius:4px;font-size:13px" onkeydown="if(event.key==='Enter'){saveMemoryInline(${id});event.preventDefault()}else if(event.key==='Escape'){cancelEditMemory(${id},'${escAttr(mem.content)}')}">`;
+  textEl.innerHTML = `<input type="text" id="mem-input-${id}" style="width:100%;padding:4px;border:1px solid var(--accent);border-radius:4px;font-size:13px">`;
   const input = document.getElementById('mem-input-' + id);
-  if (input) { input.focus(); input.select(); }
+  if (input) {
+    input.value = mem.content || '';
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        saveMemoryInline(id);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        cancelEditMemory(id, mem.content || '');
+      }
+    });
+    input.focus();
+    input.select();
+  }
 }
 
 async function saveMemoryInline(id) {
@@ -2097,23 +2445,35 @@ async function deleteMemory(id) {
 }
 
 async function dbUpdateContent(store, id, newContent) {
-  const tx = db.transaction(store, 'readwrite');
-  tx.objectStore(store).get(id).onsuccess = (e) => {
-    const item = e.target.result;
-    if (!item) return;
-    item.content = newContent;
-    tx.objectStore(store).put(item);
-  };
-  await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
+  if (dbReady && db) {
+    try {
+      const tx = db.transaction(store, 'readwrite');
+      tx.objectStore(store).get(id).onsuccess = (e) => {
+        const item = e.target.result;
+        if (!item) return;
+        item.content = newContent;
+        tx.objectStore(store).put(item);
+      };
+      await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
+    } catch(e) { disableDB(e); }
+  }
+  const all = lsLoad(store);
+  const item = all.find(entry => entry.id === id);
+  if (item) { item.content = newContent; lsSave(store, all); }
 }
 async function dbDelete(store, id) {
-  const tx = db.transaction(store, 'readwrite');
-  tx.objectStore(store).delete(id);
-  await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
+  if (dbReady && db) {
+    try {
+      const tx = db.transaction(store, 'readwrite');
+      tx.objectStore(store).delete(id);
+      await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
+    } catch(e) { disableDB(e); }
+  }
+  const all = lsLoad(store).filter(item => item.id !== id);
+  lsSave(store, all);
 }
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function escAttr(s) { return String(s).replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
 </script>
 </body>
 </html>

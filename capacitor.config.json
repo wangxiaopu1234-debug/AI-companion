@@ -1,7 +1,7 @@
 {
   "appId": "com.aicompanion.app",
   "appName": "AI聊天伴侣",
-  "version": "1.12.0",
+  "version": "1.12.2",
   "webDir": "www",
   "bundledWebRuntime": false,
   "server": {
@@ -9,7 +9,7 @@
   },
   "android": {
     "allowMixedContent": true,
-    "versionCode": 1,
-    "versionName": "1.12.0"
+    "versionCode": 6,
+    "versionName": "1.12.2"
   }
 }
